@@ -64,7 +64,7 @@ public class DashboardController {
 
     @Resource
     private PermissionApi permissionApi;
-    @Resourcte
+    @Resource
     private AgreementApi agreementApi;
     @Resource
     private ProductApi productApi;
@@ -273,6 +273,104 @@ public class DashboardController {
                 response.setWm(this.subscriptionCurrentStage(wmSubscriptions));
             }
         }
+    }
+
+    @GetMapping("/subscription-risk-rating")
+    @BiteCache
+    public QueryDashboardSubscriptionRiskRatingResponse queryDashboardsSubscriptionRiskRating(@RequestParam(value = "productId", required = false) Long productId,
+                                                                                              @RequestParam("contributions") List<DashboardContributionEnum> contributions) {
+        QueryDashboardSubscriptionRiskRatingResponse response = QueryDashboardSubscriptionRiskRatingResponse.builder().build();
+        Long gpAccountId = ContextUtil.getParameter(ContextConstant.BITE_CLAIMS_GP_ACCOUNT_ID, Long.class);
+        Long tenantId = ContextUtil.getParameter(ContextConstant.BITE_CLAIMS_TENANT_ID, Long.class);
+
+        // Check whether the current login user is an IFA
+        Set<GpRoleTypeEnum> manageRoles = this.dashBoardManageRoles();
+        boolean checkManageRole = permissionApi.checkGpAccountRole(QueryTenantGpAccountRoleRequest.builder().tenantId(tenantId).gpAccountId(gpAccountId).gpRoleTypeEnums(manageRoles).build());
+        Set<GpRoleTypeEnum> ifaRoles = new HashSet<>();
+        ifaRoles.add(GpRoleTypeEnum.WEALTH_MANAGER_IFA_RIA);
+        boolean checkIfaRole = permissionApi.checkGpAccountRole(QueryTenantGpAccountRoleRequest.builder().tenantId(tenantId).gpAccountId(gpAccountId).gpRoleTypeEnums(ifaRoles).build());
+
+        List<ProductSubscription> subscriptions = new ArrayList<>();
+        List<Long> tenantIds = new ArrayList<>();
+        tenantIds.add(tenantId);
+
+        if (contributions.contains(DashboardContributionEnum.WM)) {
+            List<TenantAgreement> tenantAgreements = Optional.ofNullable(agreementApi.getTenantAgreements(tenantId, null, null, null).getData()).orElseGet(ArrayList::new);
+            tenantIds.addAll(tenantAgreements.stream().map(TenantAgreement::getWmId).toList());
+        }
+
+        if (!checkManageRole) {
+            if (contributions.contains(DashboardContributionEnum.WM) || contributions.contains(DashboardContributionEnum.IFA)) {
+                response.setStatus(QueryDashboardSubscriptionRiskRatingResponse.StatusEnum.PARAMS_ERROR);
+                return response;
+            }
+            if (checkIfaRole) {
+                // IFA perspective
+                subscriptions.addAll(
+                        Optional.ofNullable(
+                                productSubscriptionApi.querySubscription(QueryProductSubscriptionRequest.builder().tenantId(tenantId).productId(productId).isDistributedIfa(true).salesId(gpAccountId).build()).getProductSubscriptionList()
+                        ).orElseGet(ArrayList::new)
+                );
+            } else {
+                // Normal GP perspective
+                subscriptions.addAll(
+                        Optional.ofNullable(
+                                productSubscriptionApi.querySubscription(QueryProductSubscriptionRequest.builder().tenantId(tenantId).productId(productId).salesId(gpAccountId).build()).getProductSubscriptionList()
+                        ).orElseGet(ArrayList::new)
+                );
+            }
+        } else {
+            // GP, WM perspective
+            if (contributions.contains(DashboardContributionEnum.ALL) || contributions.contains(DashboardContributionEnum.INTERNAL)) {
+                subscriptions.addAll(
+                        Optional.ofNullable(
+                                productSubscriptionApi.querySubscription(QueryProductSubscriptionRequest.builder().tenantId(tenantId).productId(productId).isDistributedIfa(false).build()).getProductSubscriptionList()
+                        ).orElseGet(ArrayList::new)
+                );
+            }
+
+            if (contributions.contains(DashboardContributionEnum.ALL) || contributions.contains(DashboardContributionEnum.IFA)) {
+                subscriptions.addAll(
+                        Optional.ofNullable(
+                                productSubscriptionApi.querySubscription(QueryProductSubscriptionRequest.builder().tenantId(tenantId).productId(productId).isDistributedIfa(true).build()).getProductSubscriptionList()
+                        ).orElseGet(ArrayList::new)
+                );
+            }
+
+            if (contributions.contains(DashboardContributionEnum.ALL) || contributions.contains(DashboardContributionEnum.WM)) {
+                subscriptions.addAll(
+                        Optional.ofNullable(
+                                productSubscriptionApi.querySubscription(QueryProductSubscriptionRequest.builder().neTenantId(tenantId).productId(productId).productTenantId(tenantId).build()).getProductSubscriptionList()
+                        ).orElseGet(ArrayList::new)
+                );
+            }
+        }
+
+        // query tenant rate
+        GetTenantCurrencyResponse tenantCurrencyResponse = Optional.ofNullable(metaCurrencyApi.getTenantCurrency()).orElseGet(GetTenantCurrencyResponse::new);
+        Map<String, BigDecimal> rateMap = tenantCurrencyResponse.getMetaCurrencyWithExchangeRateVOS().stream().collect(Collectors.toMap(MetaCurrencyWithExchangeRateVO::getCurrencyCode, MetaCurrencyWithExchangeRateVO::getRate));
+        response.setRate(rateMap);
+        response.setCurrency(tenantCurrencyResponse.getBaseCurrency());
+
+        String showCurrency = tenantCurrencyResponse.getBaseCurrency();
+        if (!ObjectUtils.isEmpty(productId)) {
+            Product product = Optional.ofNullable(productApi.getProductOnly(GetProductOnlyRequest.builder().productId(productId).build()).getProduct()).orElseGet(Product::new);
+            showCurrency = product.getBaseCurrency();
+        }
+
+        // query risk rating task
+        List<Tasks> tasks = Db.from(Tasks.class).query(it -> it.and(
+                it.when(Tasks::getTasksNode).eq(TasksNodeEnum.EXTERNAL_AUDIT),
+                it.when(Tasks::getTaskStatus).eq(TaskStatusEnum.DONE),
+                it.when(Tasks::getTenantId).in(tenantIds)
+        )).list();
+
+        // Filter out subscriptions whose risk rating has done
+        this.filterRiskRatingHasDone(response, subscriptions, tasks, rateMap, showCurrency);
+
+        response.setCurrency(showCurrency);
+
+        return response;
     }
 
     @GetMapping("/pipelines-stage")
