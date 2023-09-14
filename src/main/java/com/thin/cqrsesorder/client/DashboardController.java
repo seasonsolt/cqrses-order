@@ -64,7 +64,7 @@ public class DashboardController {
 
     @Resource
     private PermissionApi permissionApi;
-    @Resource
+    @Resourcte
     private AgreementApi agreementApi;
     @Resource
     private ProductApi productApi;
